@@ -140,24 +140,11 @@ pub fn run_all() -> Vec<TestOutcome> {
             48000,
             &CleanupOptions::default(),
         );
-        // measure noise floor in a silent region (last 0.5s is phrase-free? use
-        // first 0.2s before first phrase at 0.5s)
-        let win = 4800;
-        let noise_before: f32 = contaminated[..win]
-            .chunks(2)
-            .map(|c| c[0])
-            .map(|v| v * v)
-            .sum::<f32>()
-            / win as f32;
-        let noise_after: f32 = clean[..win]
-            .chunks(2)
-            .map(|c| c[0])
-            .map(|v| v * v)
-            .sum::<f32>()
-            / win as f32;
-        let db_before = 10.0 * noise_before.max(1e-12).log10();
-        let db_after = 10.0 * noise_after.max(1e-12).log10();
-        let reduction = db_before - db_after;
+        // measure the quietest 100 ms window (robust against random phrase
+        // placement from the procedural generator)
+        let quiet_before = quietest_window_db(&contaminated, 4800);
+        let quiet_after = quietest_window_db(&clean, 4800);
+        let reduction = quiet_before - quiet_after;
         if reduction > 6.0 && report.clicks_fixed > 0 && report.breaths_removed > 0 && !report.hum_freqs.is_empty() {
             Ok(format!(
                 "noise −{:.1} dB, {} clicks, {} breaths, hum at {:?} Hz",
@@ -326,6 +313,20 @@ pub fn run_all() -> Vec<TestOutcome> {
     });
 
     results
+}
+
+fn quietest_window_db(sig: &[f32], win: usize) -> f32 {
+    // interleaved stereo: use left channel, sliding min-RMS window
+    let l: Vec<f32> = sig.chunks(2).map(|c| c[0]).collect();
+    let mut best = f32::MAX;
+    let step = (win / 4).max(1);
+    let mut i = 0;
+    while i + win <= l.len() {
+        let e: f32 = l[i..i + win].iter().map(|v| v * v).sum();
+        best = best.min(e / win as f32);
+        i += step;
+    }
+    10.0 * best.max(1e-12).log10()
 }
 
 fn rms(data: &[f32]) -> f32 {
