@@ -1,0 +1,25 @@
+[package]
+name = "aurora-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AURORA real-time audio engine: mixer graph, DSP rack, synth, AI vocal cleanup, offline render"
+
+[features]
+default = ["real-audio"]
+real-audio = ["cpal"]
+debug_record = []
+
+[dependencies]
+cpal = { version = "0.15", optional = true }
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "pcm"] }
+hound = "3.5"
+rustfft = "6.2"
+rtrb = "0.3"
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive", "rc"] }
+ron = "0.8"
+rand = "0.8"
+log = "0.4"
+mp3lame-encoder = "0.2"
+env_logger = "0.11"

@@ -1,0 +1,53 @@
+name: Build AURORA
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Engine self-test
+        run: cargo run --release -p aurora-engine --bin aurora-selftest
+      - name: Build release
+        run: cargo build --release
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/aurora-daw dist/aurora-daw-linux
+          cp target/release/aurora-selftest dist/ || true
+          tar czf aurora-daw-linux.tar.gz -C dist aurora-daw-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aurora-daw-linux
+          path: aurora-daw-linux.tar.gz
+
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/aurora-daw.exe dist/aurora-daw-windows.exe
+          Compress-Archive -Path dist/aurora-daw-windows.exe -DestinationPath aurora-daw-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aurora-daw-windows
+          path: aurora-daw-windows.zip
