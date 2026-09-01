@@ -3,7 +3,7 @@
 //! the `panels` module files.
 
 use aurora_engine::ai::CleanupOptions;
-use aurora_engine::audio_io::{create_engine_parts, AudioIO, EngineParts};
+use aurora_engine::audio_io::{create_engine_parts, AudioIO, DriverKind, EngineParts};
 use aurora_engine::engine::{BackEvent, Command, EngineRT, MeterStore, ParamStore, LoudnessTap, SpectralTap};
 use aurora_engine::effects::{EffectInstance, EffectType};
 use aurora_engine::io::ExportFormat;
@@ -102,6 +102,7 @@ pub struct AuroraApp {
     pub shots_dir: Option<String>,
     pub autotest: Option<crate::autotest::AutoTest>,
     pub stress_count: usize,
+    pub show_welcome: bool,
 }
 
 impl AuroraApp {
@@ -184,6 +185,7 @@ impl AuroraApp {
             shots_dir: opts.shots_dir.clone(),
             autotest: opts.autotest.then(crate::autotest::AutoTest::new),
             stress_count: opts.stress,
+            show_welcome: !opts.autotest && !welcome_marker().exists(),
         };
         app
     }
@@ -359,7 +361,14 @@ impl AuroraApp {
         // push armed/monitor flags to the engine atomics BEFORE the start
         // command, so the audio side sees them when it applies the command
         self.sync_params();
-        let capacity = 48000 * 60; // 60 s preallocated capture window per track
+        // No capture device? Keep the recording workflow alive with the
+        // simulated vocal source (also documents itself in the UI).
+        if let Some(a) = &self.audio {
+            if a.input_kind == DriverKind::Synthetic {
+                self.send(Command::SetSimulatedInput(true));
+            }
+        }
+        let capacity = 48000 * 180; // 3 min preallocated capture window per track
         self.send(Command::StartRecord {
             position: pos,
             capacity_frames: capacity,
@@ -897,12 +906,18 @@ impl AuroraApp {
 }
 
 pub fn dirs_music() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"));
+    if let Some(home) = home {
         let p = PathBuf::from(home).join("Music").join("Aurora");
         let _ = std::fs::create_dir_all(&p);
         return p;
     }
     PathBuf::from(".")
+}
+
+pub fn welcome_marker() -> PathBuf {
+    dirs_music().join(".aurora_welcome_seen")
 }
 
 #[cfg(target_os = "linux")]
@@ -928,22 +943,12 @@ fn read_rss_mb() -> f32 {
     0.0
 }
 
+#[derive(Clone, Default)]
 pub struct AppOptions {
     pub empty: bool,
     pub stress: usize,
     pub shots_dir: Option<String>,
     pub autotest: bool,
-}
-
-impl Default for AppOptions {
-    fn default() -> Self {
-        Self {
-            empty: false,
-            stress: 0,
-            shots_dir: None,
-            autotest: false,
-        }
-    }
 }
 
 impl eframe::App for AuroraApp {

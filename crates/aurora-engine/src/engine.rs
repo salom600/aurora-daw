@@ -110,6 +110,8 @@ pub struct MeterStore {
     /// 0 unknown, 1 cpal device, 2 synthetic
     pub driver_kind: AtomicU32,
     pub input_peak: AtomicU32,
+    /// Sample rate of the live capture device (0 = no device feed)
+    pub input_rate: AtomicU32,
 }
 
 impl MeterStore {
@@ -126,6 +128,7 @@ impl MeterStore {
             xruns: AtomicU64::new(0),
             driver_kind: AtomicU32::new(0),
             input_peak: AtomicU32::new(0),
+            input_rate: AtomicU32::new(0),
         };
         for _ in 0..MAX_TRACK_SLOTS {
             s.track_peak.push(AtomicU32::new(0));
@@ -699,13 +702,16 @@ impl EngineRT {
         self.send_buf[..frames * 2].fill(0.0);
         let offline = self.offline;
 
-        // simulated input source (headless/CI recording path)
-        if !offline && self.simulated_input {
-            self.generate_simulated_input(frames);
-        }
-
-        // pull input block once and capture into armed record buffers
-        if !offline && !self.records.is_empty() {
+        // ---- live input flow -------------------------------------------
+        // The input ring is drained on EVERY live block so an external
+        // device feed (real microphone via cpal) is never backlogged, the
+        // input meter is always live, and monitoring works even before
+        // recording starts. When no external feed exists, the simulated
+        // source (CI/headless) can push into the same ring.
+        if !offline {
+            if self.simulated_input {
+                self.generate_simulated_input(frames);
+            }
             if self.input_scratch.len() < frames * 2 {
                 self.input_scratch.resize(frames * 2, 0.0);
             }
@@ -724,35 +730,40 @@ impl EngineRT {
             for v in &mut self.input_scratch[got..frames * 2] {
                 *v = 0.0;
             }
-            let full = self.input_scratch[..frames * 2].to_vec();
-            let mut stop_all = false;
-            for rec in &mut self.records {
-                if rec.count + frames * 2 <= rec.samples.len() {
-                    rec.samples[rec.count..rec.count + frames * 2].copy_from_slice(&full);
-                    rec.count += frames * 2;
-                } else {
-                    stop_all = true;
-                }
-            }
-            let pk = full.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            self.meters.input_peak.store(pk.to_bits(), Ordering::Relaxed);
+            let pk = self.input_scratch[..frames * 2]
+                .iter()
+                .fold(0.0f32, |m, v| m.max(v.abs()));
+            let prev = f32::from_bits(self.meters.input_peak.load(Ordering::Relaxed));
+            self.meters
+                .input_peak
+                .store(pk.max(prev * 0.82).to_bits(), Ordering::Relaxed);
             #[cfg(feature = "debug_record")]
             if self.meters.blocks.load(Ordering::Relaxed) % 100 == 0 {
-                eprintln!("[eng] capture: got={got} pk={pk:.3} rec0_count={}", self.records.first().map(|r| r.count).unwrap_or(0));
+                eprintln!("[eng] input: got={got} pk={pk:.3} recs={}", self.records.len());
             }
-            #[cfg(feature = "debug_record")]
-            eprintln!("[rec] got={got} records={} count0={}", self.records.len(), self.records.first().map(|r| r.count).unwrap_or(0));
-            if stop_all {
-                let recs = std::mem::take(&mut self.records);
-                for r in recs {
-                    let mut samples = r.samples;
-                    samples.truncate(r.count);
-                    if let Some(b) = &self.back_tx {
-                        let _ = b.send(BackEvent::RecordedTake {
-                            track_id: r.track_id,
-                            position: r.position,
-                            samples,
-                        });
+            if !self.records.is_empty() {
+                let full = self.input_scratch[..frames * 2].to_vec();
+                let mut stop_all = false;
+                for rec in &mut self.records {
+                    if rec.count + frames * 2 <= rec.samples.len() {
+                        rec.samples[rec.count..rec.count + frames * 2].copy_from_slice(&full);
+                        rec.count += frames * 2;
+                    } else {
+                        stop_all = true;
+                    }
+                }
+                if stop_all {
+                    let recs = std::mem::take(&mut self.records);
+                    for r in recs {
+                        let mut samples = r.samples;
+                        samples.truncate(r.count);
+                        if let Some(b) = &self.back_tx {
+                            let _ = b.send(BackEvent::RecordedTake {
+                                track_id: r.track_id,
+                                position: r.position,
+                                samples,
+                            });
+                        }
                     }
                 }
             }
@@ -778,7 +789,7 @@ impl EngineRT {
             let flags = ps.flags.load(Ordering::Relaxed);
             let mute = flags & 1 != 0;
             let solo = flags & 2 != 0;
-            let armed = flags & 4 != 0;
+            let _armed = flags & 4 != 0;
             let monitoring = flags & 8 != 0;
             if mute || (solo_any && !solo) {
                 continue;
@@ -901,7 +912,9 @@ impl EngineRT {
             }
 
             // ---------- low-latency monitoring ----------
-            if armed && monitoring && !offline && !self.input_scratch.is_empty() {
+            // Monitor whenever the track requests it (independent of record
+            // arming) so a singer can warm up with the full chain live.
+            if monitoring && !offline && !self.input_scratch.is_empty() {
                 for i in 0..frames {
                     let idx = i * 2;
                     if idx + 1 < t.buf.len() && idx + 1 < self.input_scratch.len() {

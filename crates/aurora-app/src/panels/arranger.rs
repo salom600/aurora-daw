@@ -154,7 +154,15 @@ impl AuroraApp {
                         match k {
                             0 => t.solo = !t.solo,
                             1 => t.mute = !t.mute,
-                            _ => t.armed = !t.armed,
+                            2 => t.armed = !t.armed,
+                            _ => {
+                                t.monitoring = !t.monitoring;
+                                self.status = if t.monitoring {
+                                    format!("{}: live input monitoring ON — hear yourself with the track chain", t.name)
+                                } else {
+                                    format!("{}: monitoring off", t.name)
+                                };
+                            }
                         }
                     }
                 }
@@ -281,13 +289,14 @@ impl AuroraApp {
                     Theme::TEXT_FAINT,
                 );
             }
-            // S M R chips + meter
+            // S M R O chips + meter (O = live input monitor)
             let chip_y = hdr.top() + hdr.height() - 12.0;
             let mut flags_clicked: Option<u8> = None;
             for (k, (label, active, col)) in [
                 ("S", t.solo, Theme::YELLOW),
                 ("M", t.mute, Theme::RECORD),
                 ("R", t.armed, Theme::PLAY),
+                ("O", t.monitoring, Theme::CYAN),
             ]
             .iter()
             .enumerate()
@@ -313,7 +322,7 @@ impl AuroraApp {
             let lvl = f32::from_bits(self.parts.meters.track_peak[ti.min(4095)].load(std::sync::atomic::Ordering::Relaxed));
             let lvl_db = 20.0 * lvl.max(1e-6).log10();
             let m01 = crate::theme::db_to_meter(lvl_db);
-            let mr = Rect::from_min_size(Pos2::new(hdr.left() + 74.0, chip_y + 2.0), Vec2::new(hdr.right() - hdr.left() - 82.0, 7.0));
+            let mr = Rect::from_min_size(Pos2::new(hdr.left() + 95.0, chip_y + 2.0), Vec2::new(hdr.right() - hdr.left() - 103.0, 7.0));
             painter.rect_filled(mr, 2.0, Color32::from_rgb(14, 20, 32));
             let mw = mr.width() * m01;
             if mw > 1.0 {

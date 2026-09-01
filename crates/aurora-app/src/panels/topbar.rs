@@ -259,7 +259,37 @@ impl AuroraApp {
                         _ => ("—", Theme::TEXT_FAINT),
                     };
                     ui.separator();
-                    ui.label(egui::RichText::new(format!("● {}", driver_chip.0)).size(9.0).color(driver_chip.1));
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("● {}", driver_chip.0)).size(9.0).color(driver_chip.1));
+                            // live input meter — moves when the microphone hears sound
+                            let ip = f32::from_bits(self.parts.meters.input_peak.load(Ordering::Relaxed));
+                            bar_mini(ui, (ip * 2.5).clamp(0.0, 1.0), Theme::GREEN, 40.0);
+                            if ui
+                                .add(egui::Button::new(egui::RichText::new("?").size(8.0)).small())
+                                .clicked()
+                            {
+                                self.show_welcome = true;
+                            }
+                        });
+                        if let Some(a) = &self.audio {
+                            let out_n = a.device_name.chars().take(26).collect::<String>();
+                            let in_n = a.input_name.chars().take(26).collect::<String>();
+                            let in_col = if a.input_kind == aurora_engine::audio_io::DriverKind::RealDevice {
+                                Theme::GREEN
+                            } else {
+                                Theme::YELLOW
+                            };
+                            ui.label(egui::RichText::new(format!("OUT {out_n}")).size(7.5).color(Theme::TEXT_FAINT));
+                            ui.label(egui::RichText::new(format!("IN  {in_n}")).size(7.5).color(in_col));
+                        }
+                    }).response.on_hover_text(format!(
+                        "Audio engine status\n\nOutput: {}\nInput: {}{}{}\n\n● GREEN = real sound card (WASAPI/ALSA)\n● YELLOW = software fallback\n\nThe IN meter moves when your microphone hears sound.\nClick O on a track header to monitor yourself live.",
+                        self.audio.as_ref().map(|a| a.device_name.as_str()).unwrap_or("—"),
+                        self.audio.as_ref().map(|a| a.input_name.as_str()).unwrap_or("—"),
+                        self.audio.as_ref().filter(|a| a.input_sample_rate > 0).map(|a| format!(" @ {} Hz", a.input_sample_rate)).unwrap_or_default(),
+                        self.audio.as_ref().filter(|a| !a.inputs.is_empty()).map(|a| format!("\n\nAvailable inputs:\n{}", a.inputs.iter().take(8).map(|s| format!("• {s}")).collect::<Vec<_>>().join("\n"))).unwrap_or_default(),
+                    ));
 
                     // ---- status ----
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

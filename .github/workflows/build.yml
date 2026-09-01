@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-linux:
     runs-on: ubuntu-22.04
@@ -25,7 +28,8 @@ jobs:
           mkdir -p dist
           cp target/release/aurora-daw dist/aurora-daw-linux
           cp target/release/aurora-selftest dist/ || true
-          tar czf aurora-daw-linux.tar.gz -C dist aurora-daw-linux
+          cp README_FIRST.txt dist/ || true
+          tar czf aurora-daw-linux.tar.gz -C dist aurora-daw-linux README_FIRST.txt
       - uses: actions/upload-artifact@v4
         with:
           name: aurora-daw-linux
@@ -41,13 +45,52 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Build release
         run: cargo build --release
+      - name: Run engine self-test on the built Windows exe
+        run: |
+          .\target\release\aurora-selftest.exe
+          echo "SELFTEST_EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { throw "Engine self-test FAILED on Windows build" }
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/aurora-daw.exe dist/aurora-daw-windows.exe
-          Compress-Archive -Path dist/aurora-daw-windows.exe -DestinationPath aurora-daw-windows.zip
+          Copy-Item README_FIRST.txt dist/
+          $bat = @'
+@echo off
+title AURORA Producer Suite
+cd /d "%~dp0"
+echo Starting AURORA Producer Suite...
+start "" "aurora-daw-windows.exe"
+exit
+'@
+          Set-Content -Path dist/START_AURORA.bat -Value $bat -Encoding ASCII
+          Compress-Archive -Path dist/aurora-daw-windows.exe, dist/README_FIRST.txt, dist/START_AURORA.bat -DestinationPath aurora-daw-windows.zip -Force
+          Get-Item aurora-daw-windows.zip | Select-Object Name, Length
       - uses: actions/upload-artifact@v4
         with:
           name: aurora-daw-windows
           path: aurora-daw-windows.zip
+
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: rel
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: AURORA latest build
+          files: |
+            rel/aurora-daw-windows/aurora-daw-windows.zip
+            rel/aurora-daw-linux/aurora-daw-linux.tar.gz
+          allowUpdates: true
+          replacesArtifacts: true
+          body: |
+            Automated build of AURORA Producer Suite.
+            Download aurora-daw-windows.zip, unzip, run START_AURORA.bat (or the exe directly — click "More info" → "Run anyway" if SmartScreen asks).
+            Every build passes the engine self-test suite on Windows before packaging.

@@ -267,6 +267,86 @@ impl AuroraApp {
     // ------------------------------------------------------------------
 
     pub fn draw_dialogs(&mut self, ctx: &egui::Context) {
+        // welcome / quick start (first run, or via the "?" button)
+        if self.show_welcome {
+            let mut open = true;
+            let mut dismiss = false;
+            egui::Window::new("Welcome to AURORA — Quick Start")
+                .open(&mut open)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .resizable(false)
+                .collapsible(false)
+                .frame(
+                    egui::Frame::none()
+                        .fill(Theme::PANEL2)
+                        .stroke(Stroke::new(1.0, Theme::BORDER_HI))
+                        .rounding(Theme::R)
+                        .inner_margin(egui::Margin::same(16.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.set_width(430.0);
+                    ui.label(egui::RichText::new("This is a REAL studio — every control is live.").size(12.5).color(Theme::CYAN));
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(
+                        "▶ PLAY — press Play (or Space) and you will HEAR the demo song through your sound card.",
+                    ).size(10.5).color(Theme::TEXT));
+                    ui.label(egui::RichText::new(
+                        "● RECORD — click O on a track to monitor, R to arm, then the red REC button: your real microphone is captured onto the timeline.",
+                    ).size(10.5).color(Theme::TEXT));
+                    ui.label(egui::RichText::new(
+                        "✦ AI CLEAN — one click removes noise, clicks, breaths, hum and harshness from vocal takes (browser panel, left).",
+                    ).size(10.5).color(Theme::TEXT));
+                    ui.label(egui::RichText::new(
+                        "✎ EDIT — drag clips, split, duplicate, draw notes in the piano roll, mix in the mixer below.",
+                    ).size(10.5).color(Theme::TEXT));
+                    ui.label(egui::RichText::new(
+                        "⬇ EXPORT — bounce WAV/MP3 release files (File menu or Ctrl+E).",
+                    ).size(10.5).color(Theme::TEXT));
+                    ui.add_space(4.0);
+                    let (drv_col, drv_txt) = {
+                        let k = self.parts.meters.driver_kind.load(std::sync::atomic::Ordering::Relaxed);
+                        match k {
+                            1 => (Theme::GREEN, "sound card connected (low-latency device driver)".to_string()),
+                            2 => (Theme::YELLOW, "software clock driver (no audio device detected)".to_string()),
+                            _ => (Theme::TEXT_FAINT, "audio initializing…".to_string()),
+                        }
+                    };
+                    ui.label(egui::RichText::new(format!("● Audio output: {drv_txt}")).size(10.0).color(drv_col));
+                    if let Some(a) = &self.audio {
+                        let in_txt = if a.input_kind == aurora_engine::audio_io::DriverKind::RealDevice {
+                            format!("real microphone: {} @ {} Hz", a.input_name, a.input_sample_rate)
+                        } else {
+                            "no capture device — demo source available".to_string()
+                        };
+                        ui.label(egui::RichText::new(format!("● Audio input: {in_txt}")).size(10.0).color(
+                            if a.input_kind == aurora_engine::audio_io::DriverKind::RealDevice { Theme::GREEN } else { Theme::YELLOW },
+                        ));
+                    }
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new("Start making music").color(Theme::BG))
+                                    .fill(Theme::CYAN),
+                            )
+                            .clicked()
+                        {
+                            dismiss = true;
+                        }
+                        if ui.button("Play demo now").clicked() {
+                            dismiss = true;
+                            self.play();
+                        }
+                    });
+                });
+            if dismiss {
+                self.show_welcome = false;
+                let _ = std::fs::write(crate::app::welcome_marker(), b"1");
+            } else {
+                self.show_welcome = open;
+            }
+        }
+
         // export dialog
         if let Some(mut dlg) = self.export_dlg.take() {
             let mut cancel = false;

@@ -1,10 +1,12 @@
 //! Audio device layer — real I/O via cpal (ALSA/WASAPI/CoreAudio) with an
 //! automatic precision synthetic driver fallback for environments without a
-//! sound device (containers/CI). Recording input comes through the same
-//! layer; when no capture device exists, the simulated vocal source feeds
-//! the pipeline so every feature stays fully functional and testable.
+//! sound device (containers/CI). Output AND input (microphone) both run on
+//! the real device when available: captures are fed into the engine's
+//! lock-free input ring, converted from the device's native sample format,
+//! channel count and sample rate to the engine's stereo 48 kHz stream.
 
 use crate::engine::{EngineRT, LoudnessTap, MeterStore, ParamStore, SpectralTap};
+use rtrb::Producer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -55,6 +57,13 @@ pub struct AudioIO {
     pub device_name: String,
     pub sample_rate: u32,
     pub buffer_frames: usize,
+    /// Capture side: RealDevice = live microphone feeding the engine ring.
+    pub input_kind: DriverKind,
+    pub input_name: String,
+    pub input_sample_rate: u32,
+    /// Device name listings for the UI (first = default).
+    pub outputs: Vec<String>,
+    pub inputs: Vec<String>,
     _streams: Vec<StreamBox>,
     stop_flag: Arc<AtomicBool>,
     synth_thread: Option<std::thread::JoinHandle<()>>,
@@ -93,6 +102,7 @@ impl AudioIO {
         }
         #[cfg(not(feature = "real-audio"))]
         {
+            let _ = &engine;
             Self::start_synthetic_with(Some(engine))
         }
     }
@@ -142,6 +152,11 @@ impl AudioIO {
             device_name: "Aurora Synthetic Driver (software clock)".into(),
             sample_rate: sr as u32,
             buffer_frames: block,
+            input_kind: DriverKind::Synthetic,
+            input_name: "Simulated source (demo vocal)".into(),
+            input_sample_rate: sr as u32,
+            outputs: Vec::new(),
+            inputs: Vec::new(),
             _streams: vec![],
             stop_flag: stop,
             synth_thread: Some(handle),
@@ -152,6 +167,15 @@ impl AudioIO {
     fn start_cpal(engine: EngineRT) -> Result<Self, (String, EngineRT)> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         let host = cpal::default_host();
+        // enumerate device listings for the UI (best-effort)
+        let outputs: Vec<String> = host
+            .output_devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default();
+        let inputs: Vec<String> = host
+            .input_devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default();
         // all fallible steps happen while `engine` is still owned here
         let device = match host.default_output_device() {
             Some(d) => d,
@@ -206,15 +230,171 @@ impl AudioIO {
                 .driver_kind
                 .store(1, Ordering::Relaxed);
         }
+
+        // ------------------------------------------------------------------
+        // Capture stream — the REAL microphone. Feed the engine input ring.
+        // ------------------------------------------------------------------
+        let meters = cell
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|e| e.meters().clone()));
+        let mut input_kind = DriverKind::Synthetic;
+        let mut input_name = "no input device found".to_string();
+        let mut input_sample_rate = 0u32;
+        let mut in_streams: Vec<cpal::Stream> = Vec::new();
+        if let Some(meters) = meters {
+            let in_tx = cell
+                .lock()
+                .ok()
+                .and_then(|mut g| g.as_mut().and_then(|e| e.take_input_producer()));
+            if let Some(tx) = in_tx {
+                if let Some(in_dev) = host.default_input_device() {
+                    let in_name_try = in_dev.name().unwrap_or_else(|_| "input".into());
+                    match in_dev.default_input_config() {
+                        Ok(in_sup) => {
+                            let in_sr = in_sup.sample_rate().0;
+                            let in_cfg: cpal::StreamConfig = in_sup.into();
+                            let res = build_capture_stream(
+                                &in_dev,
+                                &in_cfg,
+                                tx,
+                                in_sr,
+                                sr.min(48000).max(8000),
+                            );
+                            match res {
+                                Ok(s) => {
+                                    if s.play().is_ok() {
+                                        input_kind = DriverKind::RealDevice;
+                                        input_name = in_name_try;
+                                        input_sample_rate = in_sr;
+                                        meters.input_rate.store(in_sr, Ordering::Relaxed);
+                                        log::info!(
+                                            "capture device live: {input_name} @ {in_sr} Hz"
+                                        );
+                                        in_streams.push(s);
+                                    } else {
+                                        log::warn!("capture stream failed to start");
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("capture stream build failed: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => log::warn!("input config unavailable: {e}"),
+                    }
+                }
+            }
+        }
+
+        let mut streams = vec![StreamBox::Cpal(Box::new(stream))];
+        for s in in_streams {
+            streams.push(StreamBox::Cpal(Box::new(s)));
+        }
         Ok(Self {
             kind: DriverKind::RealDevice,
             device_name,
             sample_rate: sr,
             buffer_frames,
-            _streams: vec![StreamBox::Cpal(Box::new(stream))],
+            input_kind,
+            input_name,
+            input_sample_rate,
+            outputs,
+            inputs,
+            _streams: streams,
             stop_flag: Arc::new(AtomicBool::new(false)),
             synth_thread: None,
         })
+    }
+}
+
+#[cfg(feature = "real-audio")]
+fn build_capture_stream(
+    dev: &cpal::Device,
+    cfg: &cpal::StreamConfig,
+    tx: Producer<f32>,
+    in_sr: u32,
+    out_sr: u32,
+) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    use cpal::traits::DeviceTrait;
+    let channels = cfg.channels.max(1) as usize;
+    let err_fn = |e| log::error!("cpal capture error: {e}");
+    macro_rules! cap {
+        ($t:ty, $conv:expr) => {{
+            let mut tx = tx;
+            let mut rs = StereoResampler::new(in_sr, out_sr);
+            dev.build_input_stream(
+                cfg,
+                move |data: &[$t], _: &cpal::InputCallbackInfo| {
+                    let conv: fn($t) -> f32 = $conv;
+                    let mut frames = data.chunks_exact(channels);
+                    while let Some(fr) = frames.next() {
+                        let (l, r) = if channels >= 2 {
+                            (conv(fr[0]), conv(fr[1]))
+                        } else {
+                            let m = conv(fr[0]).clamp(-1.0, 1.0);
+                            (m, m)
+                        };
+                        rs.push(l, r, &mut tx);
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }};
+    }
+    match cfg_sample_format(dev, cfg) {
+        cpal::SampleFormat::F32 => cap!(f32, |v: f32| v),
+        cpal::SampleFormat::I16 => cap!(i16, |v: i16| v as f32 / 32768.0),
+        cpal::SampleFormat::U16 => cap!(u16, |v: u16| (v as f32 - 32768.0) / 32768.0),
+        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+    }
+}
+
+#[cfg(feature = "real-audio")]
+fn cfg_sample_format(dev: &cpal::Device, _cfg: &cpal::StreamConfig) -> cpal::SampleFormat {
+    use cpal::traits::DeviceTrait;
+    dev.default_input_config()
+        .map(|c| c.sample_format())
+        .unwrap_or(cpal::SampleFormat::F32)
+}
+
+/// Minimal linear-interpolation resampler converting an arbitrary device
+/// capture rate to the engine rate, stereo domain, chunk-boundary safe.
+#[cfg(feature = "real-audio")]
+struct StereoResampler {
+    /// output frames per input frame
+    step: f64,
+    frac: f64,
+    prev: [f32; 2],
+    started: bool,
+}
+
+#[cfg(feature = "real-audio")]
+impl StereoResampler {
+    fn new(in_sr: u32, out_sr: u32) -> Self {
+        Self {
+            step: (out_sr as f64 / in_sr as f64).max(1e-6),
+            frac: 0.0,
+            prev: [0.0; 2],
+            started: false,
+        }
+    }
+    #[inline]
+    fn push(&mut self, l: f32, r: f32, tx: &mut Producer<f32>) {
+        if !self.started {
+            self.started = true;
+            self.prev = [l, r];
+            return;
+        }
+        while self.frac < 1.0 {
+            let t = self.frac as f32;
+            let _ = tx.push(self.prev[0] + (l - self.prev[0]) * t);
+            let _ = tx.push(self.prev[1] + (r - self.prev[1]) * t);
+            self.frac += self.step;
+        }
+        self.frac -= 1.0;
+        self.prev = [l, r];
     }
 }
 
