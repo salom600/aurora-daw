@@ -4,7 +4,7 @@ A modern, Rust-powered virtual studio DAW for singers, producers, arrangers,
 engineers and studios. Record, produce, edit, mix, process, export and prepare
 music for release — with a lightweight engine designed for speed and stability.
 
-![AURORA](https://img.shields.io/badge/version-2.6.0-blue) ![Rust](https://img.shields.io/badge/rust-stable-orange) ![engine](https://img.shields.io/badge/audio%20engine-Rust%20real--time-success)
+![AURORA](https://img.shields.io/badge/version-2.7.0-blue) ![Rust](https://img.shields.io/badge/rust-stable-orange) ![engine](https://img.shields.io/badge/audio%20engine-Rust%20real--time-success)
 
 ## Highlights
 
