@@ -57,13 +57,13 @@ jobs:
           Copy-Item target/release/aurora-daw.exe dist/aurora-daw-windows.exe
           Copy-Item README_FIRST.txt dist/
           $bat = @'
-@echo off
-title AURORA Producer Suite
-cd /d "%~dp0"
-echo Starting AURORA Producer Suite...
-start "" "aurora-daw-windows.exe"
-exit
-'@
+          @echo off
+          title AURORA Producer Suite
+          cd /d "%~dp0"
+          echo Starting AURORA Producer Suite...
+          start "" "aurora-daw-windows.exe"
+          exit
+          '@
           Set-Content -Path dist/START_AURORA.bat -Value $bat -Encoding ASCII
           Compress-Archive -Path dist/aurora-daw-windows.exe, dist/README_FIRST.txt, dist/START_AURORA.bat -DestinationPath aurora-daw-windows.zip -Force
           Get-Item aurora-daw-windows.zip | Select-Object Name, Length
